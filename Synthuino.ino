@@ -140,6 +140,10 @@ class MidiReader {
 
 class PWMGenerator {
   public:
+    PWMGenerator(){
+      
+    }
+
     PWMGenerator(uint8_t outputPin) : _outputPin(outputPin) {
       pinMode(_outputPin, OUTPUT);
     }
@@ -223,24 +227,86 @@ enum Note {
   B
 };
 
-float noteFrequency(Note note, uint8_t octave) {
-  // A4 is defined as 440 Hz
-  const float referenceFrequency = 440.0;
-  // A4 is the 9th note in our enumeration and belongs to the 4th octave
-  const int referenceNoteIndex = 9;
-  const int referenceOctave = 4;
+class Vco{
+  public:
+    int frequency = 440; // A4
+    int pitchbend = 0;   // +/- 8192 where 8192 is +1 Octave
+    PWMGenerator pwmGen;
 
-  int noteIndex = static_cast<int>(note);
-  int totalHalfSteps = (octave - referenceOctave) * 12 + (noteIndex - referenceNoteIndex);
-  float frequency = referenceFrequency * pow(2, static_cast<float>(totalHalfSteps) / 12.0);
+    Vco(){
 
-  return frequency;
+    }
+
+    Vco(int pin){
+      PWMGenerator pg(pin);
+      pwmGen = pg;
+      // Set the frequency and duty cycle, then enable the PWM output
+      pwmGen.enable(false);
+      update();
+    }
+
+    void setFrequencyHz(int frequency){
+      //set in Hz
+      this->frequency = frequency;
+      update();
+    }
+
+    void setFrequencyOctave(int octave, Note note){
+      //set with octave (0-10) and note (0-11 = C, Cs, D ... B)
+      // A4 is defined as 440 Hz
+      const float referenceFrequency = 440.0;
+      // A4 is the 9th note in our enumeration and belongs to the 4th octave
+      const int referenceNoteIndex = 9;
+      const int referenceOctave = 4;
+      int noteIndex = static_cast<int>(note);
+      int totalHalfSteps = (octave - referenceOctave) * 12 + (noteIndex - referenceNoteIndex);
+      float frequency = referenceFrequency * pow(2, static_cast<float>(totalHalfSteps) / 12.0);
+      this->frequency = frequency;
+      update();
+    }
+
+    void setFrequencyNote(int noteNumber) {
+      // set with 0.. where 0 is C0
+      // A4 is defined as 440 Hz
+      const float referenceFrequency = 440.0;
+      // A4 is the 57th note in our noteNumber system (where 0 is C0)
+      const int referenceNoteNumber = 57;
+      int totalHalfSteps = noteNumber - referenceNoteNumber;
+      float frequency = referenceFrequency * pow(2, static_cast<float>(totalHalfSteps) / 12.0);
+      this->frequency = frequency;
+      update();
+    }
+
+    void setPitchbend(int midiDatabyte1, int midiDatabyte2){
+      // Combine the low and high bytes into a single 14-bit value
+      unsigned int combinedValue = (midiDatabyte2 << 7) | midiDatabyte1;
+
+      // Subtract 0x2000 (8192) to get the signed pitch bend value
+      pitchbend = static_cast<int>(combinedValue) - 0x2000;
+      update();
+    }
+
+    float bendFrequency(float frequencyHz, int pitchBend) {
+      // Ensure that the pitchBend value is within the valid range
+      if (pitchBend < -8192 || pitchBend > 8192) {
+          // Invalid pitch bend value, return an error value or handle it accordingly
+          return -1.0f;
+      }
+      // Compute the pitch bend ratio
+      // The pitch bend range is one octave (2:1 frequency ratio) for the maximum value 8192
+      float pitchBendRatio = pow(2, static_cast<float>(pitchBend) / 8192.0);
+      // Apply the pitch bend ratio to the input frequency
+      float bentFrequency = frequencyHz * pitchBendRatio;
+      return bentFrequency;
+    }
+
+    void update(){
+      pwmGen.setFrequency(bendFrequency(frequency, pitchbend));
+    }
 };
 
-// Create a PWMGenerator object using pin 9 (OC1A) for PWM output
-PWMGenerator pwmGen(9);
-
 MidiReader midi;
+Vco vco;
 
 void onMidi(MidiMessageTypes type, int channel, int data1, int data2){
   // Serial.print("Type: ");
@@ -254,16 +320,19 @@ void onMidi(MidiMessageTypes type, int channel, int data1, int data2){
   // Serial.print("\n");
   switch(type){
     case NoteOn:
-      int nt = noteFrequency(((data1 % 12) + 12) % 12, data1 / 0x0C);
-      pwmGen.setFrequency(nt);
-      pwmGen.enable(data2 != 0x00);
+      vco.setFrequencyNote(data1);
+      vco.pwmGen.enable(data2 != 0x00);
     break;
     case NoteOff:
-      pwmGen.setFrequency(noteFrequency(data1 / 0x0C, ((data1 % 12) + 12) % 12));
-      pwmGen.enable(false);
+      vco.pwmGen.enable(false);
+    break;
+    case PitchBend:
+      vco.setPitchbend(data1, data2);
     break;
   }
 }
+
+
 
 int lastMlls = 0;
 int counter = 0;
@@ -274,10 +343,9 @@ void setup() {
   Serial.begin(31250);
   MidiReader md(onMidi);
   midi = md;
-  // Set the frequency and duty cycle, then enable the PWM output
-  pwmGen.setFrequency(1000); // 1 kHz
-  pwmGen.setDutyCycle(50); // 50% duty cycle
-  pwmGen.enable(false);
+  Vco vc(9);
+  vco = vc;
+
 }
 
 void loop() {
@@ -290,7 +358,7 @@ void loop() {
     if(dutyc >= 100){
       dutyc = 0;
     }
-    pwmGen.setDutyCycle(dutyc);
+    vco.pwmGen.setDutyCycle(dutyc);
   }
 
   midi.update();
